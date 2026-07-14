@@ -19,12 +19,15 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .config import PairConfig as Config
+    CollectorState = Any
 
 import requests
 
 from .util import (
-    KNOWN_TOKENS,
     build_tenderly_url,
     derive_gas_costs,
     derive_price_impact_bps,
@@ -163,6 +166,12 @@ def impact_pct(observed_price: float, spot: float, direction: str) -> float:
 # ── Spot / robust mid ────────────────────────────────────────────────────────
 
 
+ROBUST_MID_MIN_DEPTH_USD = 2_500.0
+ROBUST_MID_MAX_DEPTH_USD = 10_000.0
+ROBUST_MID_TARGET_DEPTH_USD = 5_000.0
+ROBUST_MID_SAMPLES = 5
+
+
 def fynd_spot(cfg: Config, state: CollectorState) -> float | None:
     """Spot in token_in-per-token_out terms (USDC/ETH for ETH/USDC pair)."""
     probe_usd = 1_000.0
@@ -211,29 +220,91 @@ def _mid_at_depth(cfg: Config, depth_usd: float, spot: float, state: CollectorSt
     return (bp + sp) / 2.0
 
 
-def compute_robust_mid(cfg: Config, spot: float, max_depth_usd: float, state: CollectorState) -> tuple[float, float]:
-    samples = 5
-    min_d = 1_000.0
-    max_d = max(max_depth_usd, min_d * 10)
-    depths = [
-        math.exp(math.log(min_d) + i * (math.log(max_d) - math.log(min_d)) / (samples - 1))
-        for i in range(samples)
+def _choose_robust_mid(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
+    clean = [
+        (float(depth), float(mid))
+        for depth, mid in pairs
+        if is_finite_number(depth) and depth > 0 and is_finite_number(mid)
     ]
+    if not clean:
+        return None
+
+    band = [
+        pair for pair in clean
+        if ROBUST_MID_MIN_DEPTH_USD <= pair[0] <= ROBUST_MID_MAX_DEPTH_USD
+    ]
+    if len(band) < 3:
+        band = sorted(
+            clean,
+            key=lambda dm: abs(math.log(dm[0] / ROBUST_MID_TARGET_DEPTH_USD)),
+        )[:ROBUST_MID_SAMPLES]
+
+    mids = [mid for _, mid in band]
+    median_mid = statistics.median(mids)
+    median_depth = min(band, key=lambda dm: abs(dm[1] - median_mid))[0]
+    return round(median_mid, 6), round(median_depth, 2)
+
+
+def compute_robust_mid_from_sweeps(
+    sweep_buy: list[dict],
+    sweep_sell: list[dict],
+) -> tuple[float, float] | None:
+    """Near-marginal two-sided mid from already-collected on-chain sweep quotes.
+
+    The price line should represent the current clearing price, not liquidity at
+    six- or seven-figure depth. Pair same-notional buy and sell quotes in the
+    shallow reliable band and take their median midpoint.
+    """
+    buy_by_depth: dict[float, float] = {}
+    for rec in sweep_buy:
+        depth = rec.get("amount_usd")
+        price = rec.get("price")
+        if is_finite_number(depth) and is_finite_number(price):
+            buy_by_depth[round(float(depth), 2)] = float(price)
+
     pairs: list[tuple[float, float]] = []
-    with ThreadPoolExecutor(max_workers=min(cfg.max_workers, samples)) as ex:
+    for rec in sweep_sell:
+        depth = rec.get("amount_usd")
+        sell_price = rec.get("price")
+        if not is_finite_number(depth) or not is_finite_number(sell_price):
+            continue
+        buy_price = buy_by_depth.get(round(float(depth), 2))
+        if buy_price is None:
+            continue
+        pairs.append((float(depth), (buy_price + float(sell_price)) / 2.0))
+
+    return _choose_robust_mid(pairs)
+
+
+def _robust_mid_probe_depths(max_depth_usd: float) -> list[float]:
+    max_d = max(ROBUST_MID_MIN_DEPTH_USD, min(max_depth_usd, ROBUST_MID_MAX_DEPTH_USD))
+    if max_d <= ROBUST_MID_MIN_DEPTH_USD:
+        return [ROBUST_MID_MIN_DEPTH_USD]
+    return [
+        math.exp(
+            math.log(ROBUST_MID_MIN_DEPTH_USD)
+            + i * (math.log(max_d) - math.log(ROBUST_MID_MIN_DEPTH_USD))
+            / (ROBUST_MID_SAMPLES - 1)
+        )
+        for i in range(ROBUST_MID_SAMPLES)
+    ]
+
+
+def compute_robust_mid(cfg: Config, spot: float, max_depth_usd: float, state: CollectorState) -> tuple[float, float]:
+    depths = _robust_mid_probe_depths(max_depth_usd)
+    pairs: list[tuple[float, float]] = []
+    with ThreadPoolExecutor(max_workers=min(cfg.max_workers, len(depths))) as ex:
         futs = {ex.submit(_mid_at_depth, cfg, d, spot, state): d for d in depths}
         for fut in as_completed(futs):
             m = fut.result()
             if m is not None:
                 pairs.append((futs[fut], m))
-    if not pairs:
+    robust = _choose_robust_mid(pairs)
+    if robust is None:
         state.mid_degraded_count += 1
         state.add_error("robust mid degraded: every mid probe failed; using spot", "mid")
-        return spot, min_d
-    mids = [m for _, m in pairs]
-    median_mid = statistics.median(mids)
-    median_depth = min(pairs, key=lambda dm: abs(dm[1] - median_mid))[0]
-    return round(median_mid, 6), round(median_depth, 2)
+        return spot, ROBUST_MID_MIN_DEPTH_USD
+    return robust
 
 
 def _route_meta_of(quote: dict | None) -> dict:
@@ -452,6 +523,26 @@ def extract_route_meta(quotes: list[dict]) -> dict:
     return {"protocols": sorted(protocols), "pools": sorted(pools), "pool_count": len(pools)}
 
 
+def _raw_quote_block(raw: dict | None) -> int | None:
+    blk = (raw or {}).get("block") or {}
+    bn = blk.get("number")
+    return bn if isinstance(bn, int) and bn > 0 else None
+
+
+def _quote_record_matches_block(rec: dict, block: int) -> bool:
+    bn = _raw_quote_block(rec.get("_raw"))
+    return bn is None or bn == block
+
+
+def _iter_quote_records(levels: dict[str, dict], sweeps: list[list[dict]]) -> list[dict]:
+    records: list[dict] = []
+    for sides in levels.values():
+        records.extend(sides.values())
+    for sweep in sweeps:
+        records.extend(sweep)
+    return records
+
+
 # ── Snapshot ─────────────────────────────────────────────────────────────────
 
 
@@ -545,12 +636,6 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
                 "_solve_time_ms": anchor["q"].get("_solve_time_ms"),
             })
 
-    # Robust mid (uses largest non-capped depth as max anchor)
-    max_depth_anchor = 500_000.0
-    if sweep_buy:
-        max_depth_anchor = sweep_buy[-1]["amount_usd"]
-    robust_mid, median_depth = compute_robust_mid(cfg, spot, max_depth_anchor, state)
-
     # route_meta_by_level: take the route recorded on each level's best
     # quote (now persisted per record), aggregate cross-protocols too.
     KEY_LEVELS = ("0.1", "1.0", "10.0", "25.0", "50.0")
@@ -589,43 +674,17 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
         },
     }
 
-    duration_ms = int((time.monotonic() - started) * 1000)
-
-    # Block-wide context for SQLite + tenderly URL: gas_price + block hash
-    # + block timestamp. Take from any successful quote's raw (all Fynd
-    # quotes inside one collection cycle solve against the same block).
-    block_hash: str | None = None
-    block_ts: int | None = None        # epoch seconds
-    block_gas_price_wei: str | None = None
-    for sides in levels.values():
-        for rec in sides.values():
-            raw = rec.get("_raw")
-            if not raw:
-                continue
-            blk = raw.get("block") or {}
-            if isinstance(blk.get("number"), int) and blk["number"] != block:
-                continue
-            if not block_hash and blk.get("hash"):
-                block_hash = blk["hash"]
-            if not block_ts and blk.get("timestamp"):
-                block_ts = blk["timestamp"]
-            if not block_gas_price_wei and raw.get("gas_price"):
-                block_gas_price_wei = raw["gas_price"]
-            if block_hash and block_ts and block_gas_price_wei:
-                break
-        if block_hash and block_ts and block_gas_price_wei:
-            break
+    quote_records = _iter_quote_records(levels, [sweep_buy, sweep_sell])
 
     # ── Block identity from the quotes themselves ───────────────────────
     # The RPC head at cycle start can differ from the block Fynd actually
     # solved against (a ~10s sweep straddles boundaries). Majority wins; a
     # split is flagged rather than silently relabelled.
     _bn_counts: dict[int, int] = {}
-    for _sides in levels.values():
-        for _rec in _sides.values():
-            _bn = (((_rec.get("_raw") or {}).get("block")) or {}).get("number")
-            if isinstance(_bn, int) and _bn > 0:
-                _bn_counts[_bn] = _bn_counts.get(_bn, 0) + 1
+    for _rec in quote_records:
+        _bn = _raw_quote_block(_rec.get("_raw"))
+        if _bn is not None:
+            _bn_counts[_bn] = _bn_counts.get(_bn, 0) + 1
     mixed_block = False
     if _bn_counts:
         _majority = max(_bn_counts, key=_bn_counts.get)
@@ -636,6 +695,36 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
                 f"mixed-block snapshot: {_bn_counts} → labelled {_majority}", "block_identity")
         block = _majority
 
+    sweep_buy_for_mid = [rec for rec in sweep_buy if _quote_record_matches_block(rec, block)]
+    sweep_sell_for_mid = [rec for rec in sweep_sell if _quote_record_matches_block(rec, block)]
+    robust = compute_robust_mid_from_sweeps(sweep_buy_for_mid, sweep_sell_for_mid)
+    if robust is None:
+        max_depth_anchor = sweep_buy_for_mid[-1]["amount_usd"] if sweep_buy_for_mid else 500_000.0
+        robust = compute_robust_mid(cfg, spot, max_depth_anchor, state)
+    robust_mid, median_depth = robust
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    # Block-wide context for SQLite + tenderly URL: gas_price + block hash
+    # + block timestamp. In mixed cycles, only use context from the block that
+    # will label persisted rows.
+    block_hash: str | None = None
+    block_ts: int | None = None        # epoch seconds
+    block_gas_price_wei: str | None = None
+    for rec in quote_records:
+        raw = rec.get("_raw")
+        if not raw or not _quote_record_matches_block(rec, block):
+            continue
+        blk = raw.get("block") or {}
+        if not block_hash and blk.get("hash"):
+            block_hash = blk["hash"]
+        if not block_ts and blk.get("timestamp"):
+            block_ts = blk["timestamp"]
+        if not block_gas_price_wei and raw.get("gas_price"):
+            block_gas_price_wei = raw["gas_price"]
+        if block_hash and block_ts and block_gas_price_wei:
+            break
+
     # ── Persist payload (SQLite) ────────────────────────────────────────
     completeness = 0
     levels_payload: list[dict] = []
@@ -644,6 +733,8 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
     for key, sides in levels.items():
         target_pct = float(key)
         for side, rec in sides.items():
+            if not _quote_record_matches_block(rec, block):
+                continue
             # token_out for this side determines the "out" decimals.
             tok_out_dec = (cfg.token_out.decimals if side == "buy" else cfg.token_in.decimals)
             eff_price = rec.get("price")
@@ -739,6 +830,8 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
     curve_payload: list[dict] = []
     for _side_name, _swp in (("buy", sweep_buy), ("sell", sweep_sell)):
         for _idx, _e in enumerate(_swp):
+            if not _quote_record_matches_block(_e, block):
+                continue
             _r = _e.get("route") or {}
             curve_payload.append({
                 "block": block, "side": _side_name, "point_index": _idx,

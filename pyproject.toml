@@ -12,13 +12,13 @@ license = { text = "MIT" }
 authors = [{ name = "PropellerHeads" }]
 keywords = ["defi", "fynd", "tycho", "depth", "ethereum", "trader-data"]
 dependencies = [
-    "requests>=2.28",
+    "requests>=2.34.2",
 ]
 
 [project.optional-dependencies]
 pandas   = ["pandas>=1.5"]
 plot     = ["pandas>=1.5", "matplotlib>=3.5"]
-generate = ["requests>=2.28"]   # run your own Fynd and produce live data locally
+generate = ["requests>=2.34.2"]   # run your own Fynd and produce live data locally
 
 [project.urls]
 Repository = "https://github.com/propeller-heads/eth-price-poc-sdk"

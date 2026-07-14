@@ -3,9 +3,9 @@
     python -m eth_price_poc.generate.run_local            # ETH/USDC, prints each block
     python -m eth_price_poc.generate.run_local --once     # one snapshot then exit
 
-Pair our hosted history (via EthPricePoCClient) with your own live feed: the
-cloud gives you months of blocks you can't recreate; this gives you the current
-block from your own infra, your own key, any pair Tycho indexes.
+Pair the hosted rolling history (via EthPricePoCClient) with your own live feed.
+This command produces current snapshots from your own infrastructure and key
+for any pair available to your Fynd instance.
 
 Prereqs: a running Fynd (with your Tycho API key) reachable at --fynd-base.
 See the README "Generate your own data" section.

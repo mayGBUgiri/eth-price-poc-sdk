@@ -25,7 +25,7 @@ from eth_price_poc import client
 
 # Default base is the live deployment (https://marketprice.xyz), which serves
 # the API and the site from one origin. Pass base=... to point at your own.
-c = client()                       # ETH/USDC; use client(pair="ETH/USDT") for the USDT book
+c = client()                       # hosted deployment currently serves ETH/USDC
 
 snap   = c.latest()       # most recent block's full snapshot
 status = c.status()       # mode (live/static), blocks_behind, fynd health
@@ -41,14 +41,15 @@ print(df.head())
 
 ## Generate your own data
 
-The hosted dataset at [marketprice.xyz](https://marketprice.xyz) already serves
-**real-time** ETH/USDC depth (current block, ~12s behind chain) plus months of
-history. No key needed, just `client()` above.
+The hosted dataset at [marketprice.xyz](https://marketprice.xyz) serves the
+latest collected ETH/USDC depth plus its rolling retained history. Check
+`client().status()` for freshness before treating a snapshot as live. No key is
+needed for reads.
 
 Want your own independent feed (other token pairs, lower latency, or no
 dependency on our uptime)? Run the generator against your own Fynd instance.
-Our cloud gives you the historical archive you can't recreate; your machine
-produces the live numbers.
+The hosted API gives you retained history; your machine produces an independent
+live feed.
 
 ```bash
 pip install "eth-price-poc-sdk[generate]"
@@ -62,47 +63,6 @@ pip install "eth-price-poc-sdk[generate]"
 ```bash
 export TYCHO_API_KEY=<your key>
 ```
-
-**2b. (optional) Reproduce the split routes.** The hosted dataset runs Fynd's
-`path_frank_wolfe` split solver for the headline depth levels, so large trades
-route across several pools. To get the same locally, launch Fynd with a
-`worker_pools.toml` that adds the split pool next to `bellman_ford` and limits
-hops to a liquid connector set:
-
-```toml
-[pools.bellman_ford_2_hops]
-algorithm = "bellman_ford"
-num_workers = 4
-task_queue_capacity = 1000
-max_hops = 2
-timeout_ms = 500
-connector_tokens = [
-  "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
-  "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
-  "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
-  "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC
-  "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
-]
-
-[pools.path_frank_wolfe]
-algorithm = "path_frank_wolfe"
-num_workers = 4
-task_queue_capacity = 12
-max_hops = 2
-timeout_ms = 900
-connector_tokens = [
-  "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
-  "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
-  "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
-  "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC
-  "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
-]
-```
-
-Pass it with `--worker-pools-config worker_pools.toml`. A small
-`task_queue_capacity` on the split pool keeps it from saturating CPU on every
-quote. Skip this and Fynd's default single pool still gives valid depth data,
-just single-path routes.
 
 **3. Generate snapshots** from your local Fynd:
 
@@ -145,7 +105,7 @@ it only reads our server. The key is solely for running your own Fynd.
 | Method | Endpoint | Notes |
 |---|---|---|
 | `client.latest()` | `GET /api/latest` | Single most recent block snapshot |
-| `client.history(limit=N)` | `GET /api/history?limit=N` | Rolling window, current schema |
+| `client.history(limit=N)` | `GET /api/history?limit=N` | Rolling window; server caps N at 2,000 |
 | `client.status()` | `GET /api/status` | Live/static, blocks_behind, fynd health |
 | `client.coverage()` | `GET /api/coverage` | Indexed protocols, components |
 | `client.history_as_dataframe(limit=N)` | derived | Convenience pandas wrapper |
@@ -162,7 +122,7 @@ Each block in `history` (and the same shape under `latest`) carries:
 block:        int          # Ethereum block number
 time:         str          # ISO-8601 UTC, when this snapshot was collected
 spot_price:   float        # marginal-trade price (~$1K probe)
-robust_mid:   float        # manipulation-resistant median mid
+robust_mid:   float        # median shallow two-sided mid from existing sweep quotes
 duration_ms:  int          # how long this snapshot took to assemble
 pair:         "ETH/USDC"
 token_in / token_out:      # { address, symbol, decimals }
@@ -190,8 +150,8 @@ ceiling can't reach the target impact. `derived_from` says how a row
 was computed (`anchored_bisection` for headline targets,
 `sweep_interpolation` elsewhere).
 
-## Roadmap
+## Pair support
 
-ETH is served priced in **USDC and USDT** today (`client(pair="ETH/USDT")`).
-The collector, API, and SDK are pair-agnostic. Point them at any token pair
-Fynd can quote and the same depth/curve/route data falls out.
+The hosted deployment serves **ETH/USDC only** today. The generator and client
+can target another pair when used with a compatible Fynd/API deployment; that
+does not imply that pair is available from `marketprice.xyz`.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
-from typing import Any, Iterable
+from typing import Any
 
 import requests
 
@@ -34,7 +34,9 @@ class EthPricePoCClient:
     def __init__(self, base: str = DEFAULT_BASE, *, pair: str = "ETH/USDC",
                  timeout: float = 10.0, session: requests.Session | None = None):
         self.base = base.rstrip("/")
-        self.pair = pair                  # quote pair: "ETH/USDC" (default) or "ETH/USDT"
+        # The public deployment currently exposes ETH/USDC. Compatible private
+        # deployments may expose another pair through the same query parameter.
+        self.pair = pair
         self.timeout = timeout
         self.session = session or requests.Session()
 
