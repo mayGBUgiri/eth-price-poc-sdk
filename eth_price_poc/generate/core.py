@@ -428,10 +428,10 @@ def anchor_target_from_sweep(cfg: Config, side: str, target_pct: float,
 
 def derive_level_from_sweep(sweep: list[dict], target_pct: float, side: str,
                              search_min_usd: float, search_max_usd: float) -> dict:
-    """Reconstruct the old per-target level record by interpolating the
-    sweep. bound=max if sweep tops out below target, bound=min if even
-    the smallest sweep size already exceeds target, bound=failed if the
-    sweep is empty.
+    """Reconstruct the old per-target level record from the nearest real
+    sweep quote. bound=max if sweep tops out below target, bound=min if
+    even the smallest sweep size already exceeds target, bound=failed if
+    the sweep is empty.
     """
     record: dict = {
         "target_impact_pct": target_pct,
@@ -449,22 +449,21 @@ def derive_level_from_sweep(sweep: list[dict], target_pct: float, side: str,
         "search_max_usd": search_max_usd,
         "quote_source": QUOTE_SOURCE,
         "direction": side,
-        "derived_from": "sweep_interpolation",
+        "derived_from": "nearest_real_quote",
     }
     if not sweep:
         return record
 
-    def _from_entry(entry: dict, *, bound: str, target_reached: bool, actual: float | None = None,
-                    amount_usd: float | None = None, price: float | None = None) -> dict:
+    def _from_entry(entry: dict, *, bound: str, target_reached: bool) -> dict:
         record.update({
-            "actual_impact_pct": actual if actual is not None else entry["impact_pct"],
+            "actual_impact_pct": entry["impact_pct"],
             "target_reached": target_reached,
             "bound": bound,
-            "amount_usd": amount_usd if amount_usd is not None else entry["amount_usd"],
+            "amount_usd": entry["amount_usd"],
             "amount_in": entry["amount_in"],
             "amount_out": entry["amount_out"],
             "amount_out_net_gas": entry["amount_out_net_gas"],
-            "price": price if price is not None else entry["price"],
+            "price": entry["price"],
             "gas_estimate": entry["gas_estimate"],
             "route": entry["route"],
             "_raw": entry.get("_raw"),
@@ -476,8 +475,8 @@ def derive_level_from_sweep(sweep: list[dict], target_pct: float, side: str,
     # monotonic in size (route recomposition can dip impact as size grows), so
     # look for ANY sign change of (impact - target) between adjacent points and
     # take the crossing at the smallest size: "how much can you trade before
-    # X%". Interpolate in log(size) × impact space; the persisted raw quote is
-    # the closer endpoint (anchored targets get exact bytes via bisection).
+    # X%". Use the closer endpoint's complete measured values; anchored targets
+    # can still replace it with a tighter real quote via bisection.
     for i in range(len(sweep) - 1):
         a, b = sweep[i], sweep[i + 1]
         da = a["impact_pct"] - target_pct
@@ -487,16 +486,8 @@ def derive_level_from_sweep(sweep: list[dict], target_pct: float, side: str,
         if da == 0 or (da < 0 <= db) or (da > 0 >= db):
             di = b["impact_pct"] - a["impact_pct"]
             t = (target_pct - a["impact_pct"]) / di if di else 0.0
-            la, lb = math.log(a["amount_usd"]), math.log(b["amount_usd"])
-            usd = math.exp(la + t * (lb - la))
-            price = a["price"] + t * (b["price"] - a["price"])
             closer = a if t < 0.5 else b
-            return _from_entry(
-                closer, bound="none", target_reached=True,
-                actual=round(target_pct, 6),
-                amount_usd=round(usd, 2),
-                price=round(price, 6),
-            )
+            return _from_entry(closer, bound="none", target_reached=True)
     top = sweep[-1]
     if top["impact_pct"] < target_pct:
         return _from_entry(top, bound="max", target_reached=False)
@@ -569,8 +560,8 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
     # ── Dense sweep (replaces N independent binary searches) ────────────
     # `cfg.sweep_samples_per_side` real Fynd quotes per direction, log-
     # spaced across SEARCH_MIN..SEARCH_MAX_USD. The per-target `levels`
-    # rows expected by older clients are then derived by interpolating
-    # the sweep. Every measured point in `curve` is a real quote.
+    # rows expected by older clients are then taken from the nearest quote
+    # around each target crossing. Every value remains a real measurement.
     sweep_buy_fut: Any = None
     sweep_sell_fut: Any = None
     with ThreadPoolExecutor(max_workers=2) as outer:
@@ -617,7 +608,7 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
             rec = levels.get(key, {}).get(side)
             if not rec:
                 continue
-            # Replace the sweep-interp endpoint bytes with the anchored
+            # Replace the nearest sweep endpoint bytes with the anchored
             # quote bytes. Bound/target_reached recomputed below.
             within = abs(anchor["impact"] - target) / max(target, 0.001) < cfg.search_tol
             rec.update({

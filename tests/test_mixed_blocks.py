@@ -98,7 +98,7 @@ def _sweep_entry(cfg: PairConfig, block: int, side: str, idx: int) -> dict:
 class MixedBlockPersistenceTest(unittest.TestCase):
     def test_mixed_cycle_drops_minority_block_quote_rows(self) -> None:
         cfg = PairConfig(
-            impact_levels=[1.0],
+            impact_levels=[1.0, 1.2],
             sweep_samples_per_side=3,
             max_workers=2,
             tenderly_from_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -113,6 +113,22 @@ class MixedBlockPersistenceTest(unittest.TestCase):
                 _sweep_entry(cfg, 101, "sell", 0),
             ],
         }
+
+        # A target between measured impacts must carry one complete real quote,
+        # never a blend of its adjacent entries. 1.2 is closer to the second
+        # buy entry's 1.5% measured impact than the first entry's 0.5%.
+        nearest = core.derive_level_from_sweep(
+            sweep_by_side["buy"], 1.2, "buy", 10.0, 50_000_000.0,
+        )
+        expected = sweep_by_side["buy"][1]
+        self.assertEqual(nearest["derived_from"], "nearest_real_quote")
+        self.assertTrue(nearest["target_reached"])
+        self.assertEqual(nearest["bound"], "none")
+        self.assertEqual(
+            (nearest["amount_usd"], nearest["price"], nearest["actual_impact_pct"]),
+            (expected["amount_usd"], expected["price"], expected["impact_pct"]),
+        )
+        self.assertIs(nearest["_raw"], expected["_raw"])
 
         def fake_anchor(
             cfg_arg: PairConfig,
@@ -174,6 +190,22 @@ class MixedBlockPersistenceTest(unittest.TestCase):
         self.assertEqual({row["side"] for row in payload["curve_points"]}, {"buy"})
         self.assertEqual({row["side"] for row in payload["route_legs"]}, {"buy"})
         self.assertEqual({row["side"] for row in payload["quote_responses"]}, {"buy"})
+
+        nearest_rows = [
+            row for row in payload["levels"]
+            if row["target_impact_pct"] == 1.2
+        ]
+        self.assertEqual(len(nearest_rows), 1)
+        nearest_row = nearest_rows[0]
+        self.assertEqual(nearest_row["derived_from"], "nearest_real_quote")
+        self.assertEqual(
+            (
+                nearest_row["amount_usd"],
+                nearest_row["effective_price"],
+                nearest_row["actual_impact_pct"],
+            ),
+            (expected["amount_usd"], expected["price"], expected["impact_pct"]),
+        )
 
         for response in payload["quote_responses"]:
             raw = json.loads(response["raw_response_json"])

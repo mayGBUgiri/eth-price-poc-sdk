@@ -146,9 +146,11 @@ route_meta_by_level:  # routes per key impact target
 ```
 
 Capped values are marked explicitly: `bound:"max"` when the search
-ceiling can't reach the target impact. `derived_from` says how a row
-was computed (`anchored_bisection` for headline targets,
-`sweep_interpolation` elsewhere).
+ceiling can't reach the target impact. `derived_from` says which real
+quote supplies the row (`anchored_bisection` for headline targets,
+`nearest_real_quote` for sweep-derived targets). For nearest-quote rows,
+`amount_usd`, `price`, and `actual_impact_pct` are copied from that measured
+sweep entry; `target_impact_pct` remains the requested rung.
 
 ## Pair support
 
