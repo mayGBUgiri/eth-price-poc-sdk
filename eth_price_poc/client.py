@@ -7,6 +7,7 @@ for a given resource, the method raises.
 """
 from __future__ import annotations
 
+import copy
 import json
 import urllib.parse
 from typing import Any
@@ -15,6 +16,16 @@ import requests
 
 
 DEFAULT_BASE = "https://marketprice.xyz"
+
+# Token metadata for the pairs the hosted deployment serves. The bulk endpoints
+# omit token identity to stay slim, so the client resolves it here; decimals are
+# required to interpret the atomic amount_in / amount_out fields.
+PAIR_TOKENS: dict[str, dict[str, dict]] = {
+    "ETH/USDC": {
+        "token_in":  {"address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "symbol": "USDC", "decimals": 6},
+        "token_out": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "symbol": "WETH", "decimals": 18},
+    },
+}
 
 
 class EthPricePoCDataUnavailable(RuntimeError):
@@ -156,7 +167,67 @@ class EthPricePoCClient:
             "(collected before curve persistence, or backend unreachable)"
         )
 
+    def tokens(self) -> dict:
+        """token_in / token_out metadata for this client's pair, each
+        {address, symbol, decimals}. Decimals are needed to convert the atomic
+        amount_in / amount_out fields to human units.
+        """
+        pair = PAIR_TOKENS.get(self.pair)
+        if pair is None:
+            raise EthPricePoCDataUnavailable(
+                f"no token metadata known for pair {self.pair!r}; "
+                f"known pairs: {sorted(PAIR_TOKENS)}"
+            )
+        return copy.deepcopy(pair)
+
+    # ── per-rung detail (route + execution) ───────────────────────────
+
+    def detail(self, block: int, side: str, target_impact_pct: float) -> dict | None:
+        """Per-rung route + execution detail for one depth cell: the per-leg
+        route (protocol, pool, token in/out, split, gas), a tooltip of the
+        measured execution metrics, and a Tenderly simulation URL.
+
+        Returns None when no detail is stored for that cell (non-anchored
+        target, or a block past the route-retention window).
+        """
+        if side not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return self._get_optional(
+            f"/api/detail?block={int(block)}&side={side}"
+            f"&target_impact_pct={float(target_impact_pct)}"
+        )
+
+    def export(self, block: int, side: str, target_impact_pct: float) -> dict | None:
+        """Raw stored Fynd quote for one depth cell: the full response, the
+        executable transaction (to, calldata, value), the fee breakdown, and a
+        Tenderly URL.
+
+        Returns None when no quote response is stored for that cell.
+        """
+        if side not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return self._get_optional(
+            f"/api/export?block={int(block)}&side={side}"
+            f"&target_impact_pct={float(target_impact_pct)}"
+        )
+
     # ── internals ─────────────────────────────────────────────────────
+
+    def _get_optional(self, api_path: str) -> dict | None:
+        """GET a resource that legitimately may not exist. Returns the parsed
+        body on 200, None on 404, and raises on transport failure."""
+        url = self.base + self._with_pair(api_path)
+        try:
+            r = self.session.get(url, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise EthPricePoCDataUnavailable(f"{url} unreachable") from e
+        if r.status_code == 404:
+            return None
+        try:
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            raise EthPricePoCDataUnavailable(f"{url} returned {r.status_code}") from e
 
     def _get_with_static_fallback(self, *, api_path: str, static_path: str | None,
                                   static_transform, allow_static: bool = True) -> dict:
