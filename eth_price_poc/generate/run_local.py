@@ -14,10 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 
 from .config import NullSink, PairConfig
 from .core import collect_snapshot
+
+
+class StderrSink(NullSink):
+    """Report collection errors on stderr so a failed snapshot is diagnosable."""
+
+    def add_error(self, msg, phase="") -> None:
+        print(f"error [{phase}]: {msg}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = PairConfig(fynd_base_url=args.fynd_base, sweep_samples_per_side=args.samples)
-    sink = NullSink()
+    sink = StderrSink()
     while True:
         snap, _payload = collect_snapshot(cfg, sink)
         if snap:
