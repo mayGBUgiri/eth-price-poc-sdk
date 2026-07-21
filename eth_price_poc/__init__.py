@@ -7,7 +7,7 @@ See README for the full schema. Quickstart:
     snap = c.latest()
     df   = c.history_as_dataframe(limit=720)
 """
-from .client import EthPricePoCClient, client
+from .client import EthPricePoCClient, EthPricePoCDataUnavailable, client
 
-__all__ = ["EthPricePoCClient", "client"]
+__all__ = ["EthPricePoCClient", "EthPricePoCDataUnavailable", "client"]
 __version__ = "0.1.0"
