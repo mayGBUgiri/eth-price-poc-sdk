@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import eth_price_poc.generate.core as core
-from eth_price_poc.generate.config import PairConfig
+from eth_price_poc.generate.config import NullSink, PairConfig
 
 
 class RecordingState:
@@ -214,6 +214,52 @@ class MixedBlockPersistenceTest(unittest.TestCase):
         persisted = json.dumps(payload, sort_keys=True)
         self.assertNotIn("101-sell", persisted)
         self.assertNotIn("pool-101", persisted)
+
+
+class NullSinkMixedBlockTest(unittest.TestCase):
+    def test_null_sink_survives_a_mixed_block_cycle(self) -> None:
+        # A sweep straddling a block boundary runs state.mixed_blocks += 1 in
+        # collect_snapshot. A NullSink without that counter raised AttributeError
+        # and aborted the standalone generate flow; this exercises it directly.
+        cfg = PairConfig(
+            impact_levels=[1.0, 1.2],
+            sweep_samples_per_side=3,
+            max_workers=2,
+            tenderly_from_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        state = NullSink()
+        sweep_by_side = {
+            "buy": [_sweep_entry(cfg, 100, "buy", 0), _sweep_entry(cfg, 100, "buy", 1)],
+            "sell": [_sweep_entry(cfg, 101, "sell", 0)],
+        }
+
+        def fake_anchor(cfg_arg, side, target_pct, sweep, spot, state_arg,
+                        max_iters=5, tolerance=0.02):
+            if target_pct != 1.0:
+                return None
+            block = 100 if side == "buy" else 101
+            return {"q": _raw_quote(cfg_arg, block, side, "anchor"),
+                    "price": 2_020.0 if side == "buy" else 1_980.0,
+                    "impact": 1.0, "usd": 1_000.0}
+
+        originals = {name: getattr(core, name) for name in (
+            "get_block_number", "fynd_spot", "sweep_side",
+            "anchor_target_from_sweep", "compute_robust_mid")}
+        core.get_block_number = lambda rpc_url: 99
+        core.fynd_spot = lambda cfg_arg, state_arg: 2_000.0
+        core.sweep_side = lambda cfg_arg, side, spot, state_arg, num_samples: sweep_by_side[side]
+        core.anchor_target_from_sweep = fake_anchor
+        core.compute_robust_mid = lambda cfg_arg, spot, max_depth_usd, state_arg: (2_000.0, 1_000.0)
+        try:
+            _snap, payload = core.collect_snapshot(cfg, state)
+        finally:
+            for name, original in originals.items():
+                setattr(core, name, original)
+
+        # The increment ran against a real NullSink without AttributeError.
+        self.assertEqual(state.mixed_blocks, 1)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["block_row"]["mixed_block"], 1)
 
 
 if __name__ == "__main__":

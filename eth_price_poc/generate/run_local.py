@@ -22,10 +22,19 @@ from .core import collect_snapshot
 
 
 class StderrSink(NullSink):
-    """Report collection errors on stderr so a failed snapshot is diagnosable."""
+    """Report collection errors and per-quote failures on stderr so a degraded
+    snapshot is diagnosable. Sweep quotes that fail are dropped by the sweep
+    rather than raised, so without surfacing them a badly degraded curve looks
+    like a normal snapshot.
+    """
 
     def add_error(self, msg, phase="") -> None:
         print(f"error [{phase}]: {msg}", file=sys.stderr)
+
+    def add_quote_failure(self, failure) -> None:
+        info = failure or {}
+        detail = info.get("msg") or info.get("raw") or ""
+        print(f"quote failure [{info.get('reason', '?')}]: {detail}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

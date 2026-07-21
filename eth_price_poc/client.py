@@ -7,24 +7,15 @@ for a given resource, the method raises.
 """
 from __future__ import annotations
 
-import copy
 import urllib.parse
 from typing import Any
 
 import requests
 
+from .generate.config import DEFAULT_PAIR, USDC, WETH
+
 
 DEFAULT_BASE = "https://marketprice.xyz"
-
-# Token metadata for the pairs the hosted deployment serves. The bulk endpoints
-# omit token identity to stay slim, so the client resolves it here; decimals are
-# required to interpret the atomic amount_in / amount_out fields.
-PAIR_TOKENS: dict[str, dict[str, dict]] = {
-    "ETH/USDC": {
-        "token_in":  {"address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "symbol": "USDC", "decimals": 6},
-        "token_out": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "symbol": "WETH", "decimals": 18},
-    },
-}
 
 
 class EthPricePoCDataUnavailable(RuntimeError):
@@ -41,7 +32,7 @@ class EthPricePoCClient:
     the static fallback. Override for local / private deployments.
     """
 
-    def __init__(self, base: str = DEFAULT_BASE, *, pair: str = "ETH/USDC",
+    def __init__(self, base: str = DEFAULT_BASE, *, pair: str = DEFAULT_PAIR,
                  timeout: float = 10.0, session: requests.Session | None = None):
         self.base = base.rstrip("/")
         # The public deployment currently exposes ETH/USDC. Compatible private
@@ -51,8 +42,8 @@ class EthPricePoCClient:
         self.session = session or requests.Session()
 
     def _with_pair(self, path: str) -> str:
-        # ETH/USDC is the server default; only a non-primary pair needs ?pair=.
-        if not self.pair or self.pair == "ETH/USDC":
+        # The default pair is the server default; only another pair needs ?pair=.
+        if not self.pair or self.pair == DEFAULT_PAIR:
             return path
         sep = "&" if "?" in path else "?"
         return f"{path}{sep}pair={urllib.parse.quote(self.pair, safe='')}"
@@ -178,24 +169,19 @@ class EthPricePoCClient:
         )
 
     def tokens(self) -> dict:
-        """token_in / token_out metadata for this client's pair, each
-        {address, symbol, decimals}.
+        """token_in / token_out for the pair, each {address, symbol, decimals}.
 
-        The mapping is the pair's canonical buy direction (token_in=USDC,
-        token_out=WETH for ETH/USDC). Atomic amount_in / amount_out are
-        side-dependent: a sell quote routes token_out -> token_in, so its
-        amount_in is in token_out's decimals and amount_out in token_in's.
-        Do not blindly scale a sell record's amount_in by token_in["decimals"].
-        For self-describing per-leg token decimals, use detail(), whose
-        route_legs carry token_in / token_out for each leg.
+        A sell record's amount_in / amount_out use the swapped tokens' decimals
+        (it routes token_out -> token_in); detail() carries per-leg decimals.
         """
-        pair = PAIR_TOKENS.get(self.pair)
-        if pair is None:
+        if self.pair != DEFAULT_PAIR:
             raise EthPricePoCDataUnavailable(
-                f"no token metadata known for pair {self.pair!r}; "
-                f"known pairs: {sorted(PAIR_TOKENS)}"
+                f"no token metadata known for pair {self.pair!r} (only {DEFAULT_PAIR})"
             )
-        return copy.deepcopy(pair)
+        return {
+            "token_in":  {"address": USDC.address, "symbol": USDC.symbol, "decimals": USDC.decimals},
+            "token_out": {"address": WETH.address, "symbol": WETH.symbol, "decimals": WETH.decimals},
+        }
 
     # ── per-rung detail (route + execution) ───────────────────────────
 

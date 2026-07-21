@@ -22,12 +22,15 @@ class TokenSpec:
 USDC = TokenSpec("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
 WETH = TokenSpec("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "WETH", 18)
 
+# "ETH" is the asset, not WETH's symbol, so the label isn't derived from the tokens.
+DEFAULT_PAIR = "ETH/USDC"
+
 
 @dataclass(frozen=True)
 class PairConfig:
     token_in: TokenSpec = USDC
     token_out: TokenSpec = WETH
-    pair_label: str = "ETH/USDC"
+    pair_label: str = DEFAULT_PAIR
 
     fynd_base_url: str = "http://127.0.0.1:3000"
     fynd_timeout_ms: int = 8000

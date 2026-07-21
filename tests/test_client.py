@@ -17,6 +17,10 @@ class FakeResponse:
         self.status_code = status_code
         self._payload = payload
 
+    @property
+    def ok(self) -> bool:
+        return self.status_code < 400
+
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise requests.HTTPError(f"{self.status_code}")
@@ -38,6 +42,23 @@ class FakeSession:
         if self.exc is not None:
             raise self.exc
         return self.response
+
+
+class RoutingSession:
+    """Returns a response based on which URL substring the GET matches."""
+
+    def __init__(self, routes):
+        self.routes = routes  # list of (url_substring, FakeResponse | Exception)
+        self.urls: list[str] = []
+
+    def get(self, url, timeout=None):
+        self.urls.append(url)
+        for substring, response in self.routes:
+            if substring in url:
+                if isinstance(response, Exception):
+                    raise response
+                return response
+        raise AssertionError(f"no route for {url}")
 
 
 class GetOptionalTest(unittest.TestCase):
@@ -87,6 +108,46 @@ class TokensTest(unittest.TestCase):
         client = EthPricePoCClient("https://example.test", pair="FOO/BAR")
         with self.assertRaises(EthPricePoCDataUnavailable):
             client.tokens()
+
+
+class CurveForBlockTest(unittest.TestCase):
+    def _client(self, routes):
+        return EthPricePoCClient("https://example.test", session=RoutingSession(routes))
+
+    def test_dense_curve_preferred_over_embedded(self) -> None:
+        history = {"blocks": [{"block": 100, "curve": {"buy": [{"amount_usd": 1, "price": 2}]}}]}
+        dense = {"curve": {"buy": [{"amount_usd": 1, "price": 2}, {"amount_usd": 3, "price": 4}]}}
+        client = self._client([
+            ("/api/history", FakeResponse(200, history)),
+            ("/api/curve", FakeResponse(200, dense)),
+        ])
+        self.assertEqual(len(client.curve_for_block(0, "buy")), 2)
+
+    def test_embedded_curve_used_when_dense_unavailable(self) -> None:
+        history = {"blocks": [{"block": 100, "curve": {"buy": [{"amount_usd": 1, "price": 2}]}}]}
+        client = self._client([
+            ("/api/history", FakeResponse(200, history)),
+            ("/api/curve", FakeResponse(500)),
+        ])
+        self.assertEqual(client.curve_for_block(0, "buy"), [{"amount_usd": 1, "price": 2}])
+
+    def test_raises_when_neither_dense_nor_embedded(self) -> None:
+        client = self._client([
+            ("/api/history", FakeResponse(200, {"blocks": [{"block": 100}]})),
+            ("/api/curve", FakeResponse(404)),
+        ])
+        with self.assertRaises(EthPricePoCDataUnavailable):
+            client.curve_for_block(0, "buy")
+
+    def test_out_of_range_index_raises(self) -> None:
+        client = self._client([("/api/history", FakeResponse(200, {"blocks": [{"block": 100}]}))])
+        with self.assertRaises(EthPricePoCDataUnavailable):
+            client.curve_for_block(5, "buy")
+
+    def test_invalid_side_rejected_before_request(self) -> None:
+        client = self._client([])
+        with self.assertRaises(ValueError):
+            client.curve_for_block(0, "up")
 
 
 if __name__ == "__main__":
