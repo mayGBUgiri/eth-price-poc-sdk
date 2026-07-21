@@ -34,8 +34,11 @@ class PairConfig:
     http_timeout_s: int = 12
     rpc_url: str = "https://ethereum.publicnode.com"
 
+    # Level keys are str(level); anchoring and the hosted dataset key on
+    # "1.0"-style strings, so every entry must be a float literal.
     impact_levels: list[float] = field(default_factory=lambda: [
-        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 25, 35, 50,
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0,
+        7.5, 10.0, 15.0, 25.0, 35.0, 50.0,
     ])
     sweep_samples_per_side: int = 100
     max_workers: int = 6
@@ -53,6 +56,7 @@ class PairConfig:
 class NullSink:
     """No-op error sink so generation runs without the collector's state."""
     mid_degraded_count = 0
+    mixed_blocks = 0
 
     def add_error(self, *_a, **_k) -> None: ...
     def add_quote_failure(self, *_a, **_k) -> None: ...
