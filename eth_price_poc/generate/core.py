@@ -570,9 +570,12 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
         sweep_buy = sweep_buy_fut.result()
         sweep_sell = sweep_sell_fut.result()
 
+    # Level keys are canonicalized via str(float(...)) so integer-valued
+    # entries in cfg.impact_levels ("1" vs "1.0") can't miss the anchor and
+    # route lookups below.
     levels: dict[str, dict] = {}
     for lvl in cfg.impact_levels:
-        key = str(lvl)
+        key = str(float(lvl))
         levels[key] = {
             "buy":  derive_level_from_sweep(sweep_buy,  lvl, "buy",  cfg.search_min_usd, cfg.search_max_usd),
             "sell": derive_level_from_sweep(sweep_sell, lvl, "sell", cfg.search_min_usd, cfg.search_max_usd),
@@ -604,7 +607,7 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
                 anchor = None
             if not anchor:
                 continue
-            key = str(target)
+            key = str(float(target))
             rec = levels.get(key, {}).get(side)
             if not rec:
                 continue

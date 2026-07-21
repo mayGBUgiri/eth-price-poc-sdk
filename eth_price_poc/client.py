@@ -7,11 +7,12 @@ for a given resource, the method raises.
 """
 from __future__ import annotations
 
-import json
 import urllib.parse
 from typing import Any
 
 import requests
+
+from .generate.config import DEFAULT_PAIR, USDC, WETH
 
 
 DEFAULT_BASE = "https://marketprice.xyz"
@@ -31,7 +32,7 @@ class EthPricePoCClient:
     the static fallback. Override for local / private deployments.
     """
 
-    def __init__(self, base: str = DEFAULT_BASE, *, pair: str = "ETH/USDC",
+    def __init__(self, base: str = DEFAULT_BASE, *, pair: str = DEFAULT_PAIR,
                  timeout: float = 10.0, session: requests.Session | None = None):
         self.base = base.rstrip("/")
         # The public deployment currently exposes ETH/USDC. Compatible private
@@ -41,8 +42,8 @@ class EthPricePoCClient:
         self.session = session or requests.Session()
 
     def _with_pair(self, path: str) -> str:
-        # ETH/USDC is the server default; only a non-primary pair needs ?pair=.
-        if not self.pair or self.pair == "ETH/USDC":
+        # The default pair is the server default; only another pair needs ?pair=.
+        if not self.pair or self.pair == DEFAULT_PAIR:
             return path
         sep = "&" if "?" in path else "?"
         return f"{path}{sep}pair={urllib.parse.quote(self.pair, safe='')}"
@@ -70,7 +71,7 @@ class EthPricePoCClient:
         )
 
     def status(self) -> dict:
-        """Backend mode (live/static), blocks_behind, fynd health, etc."""
+        """Backend mode (live/stale/degraded/starting), blocks_behind, fynd health, etc."""
         return self._get_with_static_fallback(
             api_path="/api/status",
             static_path=None,
@@ -139,24 +140,97 @@ class EthPricePoCClient:
             return ((snap.get("curve") or {}).get(side)) or []
         hist = self.history()
         blocks = hist.get("blocks") or []
-        snap = blocks[block_index]
-        curve = ((snap.get("curve") or {}).get(side)) or []
-        if curve:
-            return curve
+        try:
+            snap = blocks[block_index]
+        except IndexError:
+            raise EthPricePoCDataUnavailable(
+                f"history has no block at index {block_index} "
+                f"({len(blocks)} blocks available)"
+            ) from None
         block_num = snap.get("block")
+        # /api/history embeds a downsampled (~12-point) curve per block;
+        # the dense sweep lives at /api/curve. Fetch dense first and fall
+        # back to the embedded curve only if the backend can't serve it.
         try:
             r = self.session.get(
                 self.base + self._with_pair(f"/api/curve?block={block_num}"), timeout=self.timeout)
             if r.ok:
-                return (((r.json() or {}).get("curve") or {}).get(side)) or []
-        except (requests.RequestException, json.JSONDecodeError):
+                dense = (((r.json() or {}).get("curve") or {}).get(side)) or []
+                if dense:
+                    return dense
+        except (requests.RequestException, ValueError):
             pass
+        curve = ((snap.get("curve") or {}).get(side)) or []
+        if curve:
+            return curve
         raise EthPricePoCDataUnavailable(
-            f"no dense curve stored for block {block_num} "
+            f"no curve stored for block {block_num} "
             "(collected before curve persistence, or backend unreachable)"
         )
 
+    def tokens(self) -> dict:
+        """token_in / token_out for the pair, each {address, symbol, decimals}.
+
+        A sell record's amount_in / amount_out use the swapped tokens' decimals
+        (it routes token_out -> token_in); detail() carries per-leg decimals.
+        """
+        if self.pair != DEFAULT_PAIR:
+            raise EthPricePoCDataUnavailable(
+                f"no token metadata known for pair {self.pair!r} (only {DEFAULT_PAIR})"
+            )
+        return {
+            "token_in":  {"address": USDC.address, "symbol": USDC.symbol, "decimals": USDC.decimals},
+            "token_out": {"address": WETH.address, "symbol": WETH.symbol, "decimals": WETH.decimals},
+        }
+
+    # ── per-rung detail (route + execution) ───────────────────────────
+
+    def detail(self, block: int, side: str, target_impact_pct: float) -> dict | None:
+        """Per-rung route + execution detail for one depth cell: the per-leg
+        route (protocol, pool, token in/out, split, gas), a tooltip of the
+        measured execution metrics, and a Tenderly simulation URL.
+
+        Returns None when no detail is stored for that cell (non-anchored
+        target, or a block past the route-retention window).
+        """
+        if side not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return self._get_optional(
+            f"/api/detail?block={int(block)}&side={side}"
+            f"&target_impact_pct={float(target_impact_pct)}"
+        )
+
+    def export(self, block: int, side: str, target_impact_pct: float) -> dict | None:
+        """Raw stored Fynd quote for one depth cell: the full response, the
+        executable transaction (to, calldata, value), the fee breakdown, and a
+        Tenderly URL.
+
+        Returns None when no quote response is stored for that cell.
+        """
+        if side not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        return self._get_optional(
+            f"/api/export?block={int(block)}&side={side}"
+            f"&target_impact_pct={float(target_impact_pct)}"
+        )
+
     # ── internals ─────────────────────────────────────────────────────
+
+    def _get_optional(self, api_path: str) -> dict | None:
+        """GET a resource that legitimately may not exist. Returns the parsed
+        body on 200, None on 404, and raises on transport failure."""
+        url = self.base + self._with_pair(api_path)
+        try:
+            r = self.session.get(url, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise EthPricePoCDataUnavailable(f"{url} unreachable") from e
+        if r.status_code == 404:
+            return None
+        try:
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError) as e:
+            raise EthPricePoCDataUnavailable(f"{url} returned {r.status_code}") from e
 
     def _get_with_static_fallback(self, *, api_path: str, static_path: str | None,
                                   static_transform, allow_static: bool = True) -> dict:
@@ -169,7 +243,9 @@ class EthPricePoCClient:
             r = self.session.get(url, timeout=self.timeout)
             if r.ok:
                 return r.json()
-        except (requests.RequestException, json.JSONDecodeError):
+        # ValueError covers every JSON decode error r.json() can raise across
+        # the supported requests range (stdlib json, simplejson, requests' own).
+        except (requests.RequestException, ValueError):
             pass
         if not allow_static or not static_path:
             raise EthPricePoCDataUnavailable(
@@ -182,7 +258,7 @@ class EthPricePoCClient:
             r.raise_for_status()
             data = r.json()
             return static_transform(data) if static_transform else data
-        except (requests.RequestException, json.JSONDecodeError) as e:
+        except (requests.RequestException, ValueError) as e:
             raise EthPricePoCDataUnavailable(
                 f"both {url} and {self.base + static_path} unreachable"
             ) from e
