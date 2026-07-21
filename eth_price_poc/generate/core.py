@@ -499,21 +499,6 @@ def derive_level_from_sweep(sweep: list[dict], target_pct: float, side: str,
 # ── Route metadata aggregation ───────────────────────────────────────────────
 
 
-def extract_route_meta(quotes: list[dict]) -> dict:
-    protocols: set[str] = set()
-    pools: set[str] = set()
-    for q in quotes:
-        route = (q or {}).get("route") or {}
-        for swap in route.get("swaps", []) or []:
-            p = swap.get("protocol")
-            c = swap.get("component_id")
-            if p:
-                protocols.add(p)
-            if c:
-                pools.add(c)
-    return {"protocols": sorted(protocols), "pools": sorted(pools), "pool_count": len(pools)}
-
-
 def _raw_quote_block(raw: dict | None) -> int | None:
     blk = (raw or {}).get("block") or {}
     bn = blk.get("number")

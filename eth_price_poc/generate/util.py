@@ -111,9 +111,3 @@ def build_tenderly_url(
     if block_num is not None:
         params["block"] = str(block_num)
     return f"https://dashboard.tenderly.co/simulator/new?{urlencode(params)}", "ready"
-
-
-def etherscan_address_url(address: str | None) -> str | None:
-    if not address:
-        return None
-    return f"https://etherscan.io/address/{address}"
