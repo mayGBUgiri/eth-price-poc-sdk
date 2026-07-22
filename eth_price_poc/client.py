@@ -19,7 +19,8 @@ DEFAULT_BASE = "https://marketprice.xyz"
 
 
 class EthPricePoCDataUnavailable(RuntimeError):
-    """Raised when both the live API and the static fallback are unreachable."""
+    """Raised when data cannot be served: the live API and the static
+    fallback are both unreachable, or a response payload is malformed."""
 
 
 class EthPricePoCClient:
@@ -58,10 +59,32 @@ class EthPricePoCClient:
             static_transform=lambda d: (d.get("blocks") or [{}])[-1],
         )
 
-    def history(self, limit: int | None = None) -> dict:
-        """Rolling history. `limit` truncates from the most recent end."""
-        q = f"?limit={int(limit)}" if limit else ""
-        return self._get_with_static_fallback(
+    def history(self, limit: int | None = None, *, curve_n: int | None = None,
+                full: bool = False) -> dict:
+        """Rolling history. `limit` truncates from the most recent end.
+
+        `curve_n` sets the number of downsampled curve points per side the
+        server embeds in each block (it accepts 12-200; default 12). `full`
+        requests the dense per-block curve instead; passing both raises
+        ValueError. Per-block curves are always returned as
+        `[{amount_usd, price, ...}, ...]` lists; the compact `{a, p}` array
+        form the live server uses on the wire is normalized client-side, and
+        a payload whose curves fit neither the list nor the compact shape
+        raises EthPricePoCDataUnavailable. The static fallback serves whatever
+        resolution was frozen at the last refresh, so `curve_n` and `full`
+        only take effect while the live API is reachable.
+        """
+        if curve_n is not None and full:
+            raise ValueError("pass either curve_n or full, not both")
+        params = []
+        if limit:
+            params.append(f"limit={int(limit)}")
+        if curve_n is not None:
+            params.append(f"curve_n={int(curve_n)}")
+        if full:
+            params.append("full=1")
+        q = f"?{'&'.join(params)}" if params else ""
+        payload = self._get_with_static_fallback(
             api_path=f"/api/history{q}",
             static_path="/data.json",
             static_transform=lambda d: (
@@ -69,9 +92,11 @@ class EthPricePoCClient:
                 else d
             ),
         )
+        return self._normalize_history_curves(payload)
 
     def status(self) -> dict:
-        """Backend mode (live/stale/degraded/starting), blocks_behind, fynd health, etc."""
+        """Backend mode (live/stale/degraded/starting), blocks_behind, chain
+        head, config, etc. Fynd health is reported by coverage(), not here."""
         return self._get_with_static_fallback(
             api_path="/api/status",
             static_path=None,
@@ -80,7 +105,8 @@ class EthPricePoCClient:
         )
 
     def coverage(self) -> dict:
-        """Indexed protocols + components from Fynd's current run."""
+        """Indexed protocols + components from Fynd's current run, plus the
+        fynd health block (healthy, last_update_ms, ...) under `fynd`."""
         return self._get_with_static_fallback(
             api_path="/api/coverage",
             static_path="/coverage_static.json",
@@ -215,6 +241,46 @@ class EthPricePoCClient:
         )
 
     # ── internals ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_history_curves(payload: dict) -> dict:
+        """Expand the live server's compact per-block curve form
+        ({"a": [sizes], "p": [prices]}) into the documented
+        [{amount_usd, price}] list. Already-expanded list curves (the
+        static fallback and ?full=1 responses) pass through untouched.
+        Any other curve shape — non-list/mismatched a/p arrays, scalar
+        curve values, non-dict blocks — raises EthPricePoCDataUnavailable,
+        so callers never receive a non-list curve."""
+        def malformed(reason: str) -> EthPricePoCDataUnavailable:
+            return EthPricePoCDataUnavailable(f"malformed history payload: {reason}")
+
+        if not isinstance(payload, dict):
+            raise malformed(f"expected an object, got {type(payload).__name__}")
+        for block in payload.get("blocks") or []:
+            if not isinstance(block, dict):
+                raise malformed(f"block is {type(block).__name__}, not an object")
+            curve = block.get("curve")
+            if curve is None:
+                continue
+            if not isinstance(curve, dict):
+                raise malformed(f"curve is {type(curve).__name__}, not an object")
+            for side in ("buy", "sell"):
+                compact = curve.get(side)
+                if compact is None or isinstance(compact, list):
+                    continue
+                if not isinstance(compact, dict):
+                    raise malformed(f"{side} curve is {type(compact).__name__}")
+                sizes, prices = compact.get("a"), compact.get("p")
+                if not isinstance(sizes, list) or not isinstance(prices, list):
+                    raise malformed(f"{side} curve needs list-typed 'a' and 'p'")
+                if len(sizes) != len(prices):
+                    raise malformed(f"{side} curve has {len(sizes)} sizes "
+                                    f"but {len(prices)} prices")
+                curve[side] = [
+                    {"amount_usd": sizes[i], "price": prices[i]}
+                    for i in range(len(sizes))
+                ]
+        return payload
 
     def _get_optional(self, api_path: str) -> dict | None:
         """GET a resource that legitimately may not exist. Returns the parsed
