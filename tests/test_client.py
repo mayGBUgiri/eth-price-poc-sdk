@@ -110,6 +110,110 @@ class TokensTest(unittest.TestCase):
             client.tokens()
 
 
+class HistoryTest(unittest.TestCase):
+    @staticmethod
+    def _compact_payload() -> dict:
+        return {"blocks": [{
+            "block": 100,
+            "robust_mid": 2000.0,
+            "curve": {"buy": {"a": [50, 500], "p": [10.0, 11.0]},
+                      "sell": {"a": [50, 500], "p": [9.0, 8.0]}},
+        }]}
+
+    def test_compact_curves_normalized_to_lists(self) -> None:
+        session = FakeSession(FakeResponse(200, self._compact_payload()))
+        client = EthPricePoCClient("https://example.test", session=session)
+        curve = client.history()["blocks"][0]["curve"]
+        self.assertEqual(curve["buy"], [{"amount_usd": 50, "price": 10.0},
+                                        {"amount_usd": 500, "price": 11.0}])
+        self.assertEqual(curve["sell"], [{"amount_usd": 50, "price": 9.0},
+                                         {"amount_usd": 500, "price": 8.0}])
+
+    def test_list_curves_pass_through_unchanged(self) -> None:
+        rich_point = {"amount_usd": 1.0, "price": 2.0, "gas_estimate": "3", "impact_pct": 0.1}
+        payload = {"blocks": [{"block": 1, "curve": {"buy": [dict(rich_point)]}}]}
+        session = FakeSession(FakeResponse(200, payload))
+        client = EthPricePoCClient("https://example.test", session=session)
+        self.assertEqual(client.history()["blocks"][0]["curve"]["buy"], [rich_point])
+
+    def test_blocks_without_curve_tolerated(self) -> None:
+        session = FakeSession(FakeResponse(200, {"blocks": [{"block": 1}]}))
+        client = EthPricePoCClient("https://example.test", session=session)
+        self.assertEqual(client.history()["blocks"], [{"block": 1}])
+
+    def test_query_parameters(self) -> None:
+        session = FakeSession(FakeResponse(200, {"blocks": []}))
+        client = EthPricePoCClient("https://example.test", session=session)
+        client.history(limit=10, curve_n=48)
+        self.assertEqual(session.last_url,
+                         "https://example.test/api/history?limit=10&curve_n=48")
+        client.history(limit=10, full=True)
+        self.assertEqual(session.last_url, "https://example.test/api/history?limit=10&full=1")
+        client.history(curve_n=200)
+        self.assertEqual(session.last_url, "https://example.test/api/history?curve_n=200")
+        client.history()
+        self.assertEqual(session.last_url, "https://example.test/api/history")
+
+    def test_mismatched_compact_arrays_raise(self) -> None:
+        payload = {"blocks": [{"block": 1, "curve": {"buy": {"a": [50, 500], "p": [10.0]}}}]}
+        session = FakeSession(FakeResponse(200, payload))
+        client = EthPricePoCClient("https://example.test", session=session)
+        with self.assertRaises(EthPricePoCDataUnavailable):
+            client.history()
+
+    def test_malformed_compact_curve_raises(self) -> None:
+        bad_sides = (
+            {"a": 5, "p": None},        # non-list a/p values
+            {"a": "50", "p": "10"},     # strings are iterable but not curves
+            {"a": [50]},                # missing p
+            {"p": [10.0]},              # missing a
+            {"a": [50, 500], "p": [10.0]},  # length mismatch
+            42,                         # scalar curve side
+            "garbage",                  # string curve side
+        )
+        for bad_side in bad_sides:
+            with self.subTest(bad_side=bad_side):
+                payload = {"blocks": [{"block": 1, "curve": {"buy": bad_side}}]}
+                session = FakeSession(FakeResponse(200, payload))
+                client = EthPricePoCClient("https://example.test", session=session)
+                with self.assertRaises(EthPricePoCDataUnavailable):
+                    client.history()
+
+    def test_empty_compact_curve_normalizes_to_empty_list(self) -> None:
+        payload = {"blocks": [{"block": 1, "curve": {"buy": {"a": [], "p": []}}}]}
+        session = FakeSession(FakeResponse(200, payload))
+        client = EthPricePoCClient("https://example.test", session=session)
+        self.assertEqual(client.history()["blocks"][0]["curve"]["buy"], [])
+
+    def test_non_dict_block_raises(self) -> None:
+        session = FakeSession(FakeResponse(200, {"blocks": ["garbage"]}))
+        client = EthPricePoCClient("https://example.test", session=session)
+        with self.assertRaises(EthPricePoCDataUnavailable):
+            client.history()
+
+    def test_curve_n_and_full_mutually_exclusive(self) -> None:
+        session = FakeSession(FakeResponse(200, {"blocks": []}))
+        client = EthPricePoCClient("https://example.test", session=session)
+        with self.assertRaises(ValueError):
+            client.history(curve_n=48, full=True)
+        self.assertIsNone(session.last_url)
+
+    def test_static_fallback_slices_and_normalizes(self) -> None:
+        static = {"blocks": [
+            {"block": i, "curve": {"buy": {"a": [50], "p": [float(i)]}}}
+            for i in (1, 2, 3)
+        ]}
+        session = RoutingSession([
+            ("/api/history", requests.ConnectionError("down")),
+            ("/data.json", FakeResponse(200, static)),
+        ])
+        client = EthPricePoCClient("https://example.test", session=session)
+        hist = client.history(limit=2)
+        self.assertEqual([b["block"] for b in hist["blocks"]], [2, 3])
+        self.assertEqual(hist["blocks"][0]["curve"]["buy"],
+                         [{"amount_usd": 50, "price": 2.0}])
+
+
 class CurveForBlockTest(unittest.TestCase):
     def _client(self, routes):
         return EthPricePoCClient("https://example.test", session=RoutingSession(routes))
@@ -130,6 +234,24 @@ class CurveForBlockTest(unittest.TestCase):
             ("/api/curve", FakeResponse(500)),
         ])
         self.assertEqual(client.curve_for_block(0, "buy"), [{"amount_usd": 1, "price": 2}])
+
+    def test_embedded_compact_curve_normalized(self) -> None:
+        history = {"blocks": [{"block": 100, "curve": {"buy": {"a": [50], "p": [10.0]}}}]}
+        client = self._client([
+            ("/api/history", FakeResponse(200, history)),
+            ("/api/curve", FakeResponse(500)),
+        ])
+        self.assertEqual(client.curve_for_block(0, "buy"),
+                         [{"amount_usd": 50, "price": 10.0}])
+
+    def test_embedded_empty_compact_curve_raises(self) -> None:
+        history = {"blocks": [{"block": 100, "curve": {"buy": {"a": [], "p": []}}}]}
+        client = self._client([
+            ("/api/history", FakeResponse(200, history)),
+            ("/api/curve", FakeResponse(404)),
+        ])
+        with self.assertRaises(EthPricePoCDataUnavailable):
+            client.curve_for_block(0, "buy")
 
     def test_raises_when_neither_dense_nor_embedded(self) -> None:
         client = self._client([

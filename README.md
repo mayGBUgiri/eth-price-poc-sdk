@@ -28,9 +28,10 @@ from eth_price_poc import client
 c = client()                       # hosted deployment currently serves ETH/USDC
 
 snap   = c.latest()       # most recent block's full snapshot
-status = c.status()       # mode (live/stale/degraded/starting), blocks_behind, fynd health
-cov    = c.coverage()     # indexed protocols, components, last update
+status = c.status()       # mode (live/stale/degraded/starting), blocks_behind
+cov    = c.coverage()     # indexed protocols, components, fynd health, last update
 hist   = c.history(limit=720)  # rolling window
+dense  = c.history(limit=720, curve_n=48)  # finer per-block curves (12-200 pts/side)
 
 print(snap["block"], snap["spot_price"])
 print(c.tokens())         # token_in / token_out (address, symbol, decimals)
@@ -110,9 +111,9 @@ it only reads our server. The key is solely for running your own Fynd.
 | Method | Endpoint | Notes |
 |---|---|---|
 | `client.latest()` | `GET /api/latest` | Single most recent block, rich per-rung levels + dense curve |
-| `client.history(limit=N)` | `GET /api/history?limit=N` | Rolling window of slim blocks; server caps N at 2,000 |
-| `client.status()` | `GET /api/status` | Mode (live/stale/degraded/starting), blocks_behind, fynd health |
-| `client.coverage()` | `GET /api/coverage` | Indexed protocols, components |
+| `client.history(limit=N, curve_n=M)` | `GET /api/history?limit=N&curve_n=M` | Rolling window of slim blocks; server caps N at 2,000; `full=True` for dense curves (exclusive with `curve_n`) |
+| `client.status()` | `GET /api/status` | Mode (live/stale/degraded/starting), blocks_behind |
+| `client.coverage()` | `GET /api/coverage` | Indexed protocols, components, fynd health |
 | `client.detail(block, side, target_impact_pct)` | `GET /api/detail` | Per-rung route legs, execution tooltip, Tenderly URL; `None` if not stored |
 | `client.export(block, side, target_impact_pct)` | `GET /api/export` | Raw quote, calldata, fee breakdown; `None` if not stored |
 | `client.curve_for_block(block_index, side)` | `GET /api/curve` | Dense curve for one historical block |
@@ -153,8 +154,12 @@ blocks: [ {
 }, ... ]
 ```
 
-`curve` here is downsampled (`?curve_n=N`, 12–200); `?full=1` returns the
-dense per-block curve.
+`curve` here is downsampled (`history(curve_n=N)`, 12–200); `history(full=True)`
+returns the dense per-block curve instead (the two are mutually exclusive). On the wire the live server sends the
+downsampled form as compact `{"a": [sizes], "p": [prices]}` arrays; the client
+normalizes those to the `[{amount_usd, price}]` shape above, so `history()`
+always returns list-form curves regardless of which path (live, `full=1`,
+static fallback) served the response.
 
 ### `latest()` — one rich block
 
