@@ -35,7 +35,6 @@ class PairConfig:
     fynd_base_url: str = "http://127.0.0.1:3000"
     fynd_timeout_ms: int = 8000
     http_timeout_s: int = 12
-    rpc_url: str = "https://ethereum.publicnode.com"
 
     # Anchoring and the hosted dataset key levels on "1.0"-style strings.
     # core.py canonicalizes keys via str(float(level)); these literals are
@@ -44,7 +43,12 @@ class PairConfig:
         0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0,
         7.5, 10.0, 15.0, 25.0, 35.0, 50.0,
     ])
-    sweep_samples_per_side: int = 100
+    # 200 quotes per side is the resolution marketprice.xyz publishes ("about
+    # 200 buy quotes and 200 sell quotes" per block). The sweep floor stays
+    # well below the $10K the site charts from: the shallow rungs of
+    # impact_levels and the robust-mid band (2.5K-10K, see core.py) are both
+    # measured from sweep points under $10K.
+    sweep_samples_per_side: int = 200
     max_workers: int = 6
     search_min_usd: float = 50.0
     search_max_usd: float = 50_000_000.0
