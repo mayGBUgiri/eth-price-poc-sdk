@@ -1,7 +1,6 @@
-"""Local data generation: produce the same block-by-block depth snapshots the
-hosted dataset serves, from your own Fynd instance. The base install covers
-it; you also need a running Fynd with a Tycho API key. See the README
-"Generate your own data" section.
+"""Data generation: measure block-by-block depth snapshots with your own Fynd
+instance. The base install covers it; you also need a running Fynd with a
+Tycho API key. See the README "Run it yourself" section.
 
     from eth_price_poc.generate import PairConfig, collect_snapshot, NullSink
     snap, _ = collect_snapshot(PairConfig(), NullSink())
@@ -30,7 +29,6 @@ from .core import (
     fynd_health,
     fynd_quote,
     fynd_spot,
-    get_block_number,
     impact_pct,
     is_finite_number,
     known_token,
@@ -46,7 +44,7 @@ __all__ = [
     "collect_snapshot", "fynd_health", "fynd_quote", "fynd_spot",
     "sweep_side", "anchor_target_from_sweep", "derive_level_from_sweep",
     "compute_robust_mid", "compute_robust_mid_from_sweeps",
-    "extract_route_meta", "get_block_number",
+    "extract_route_meta",
     "impact_pct", "quote_price_in_per_out", "known_token",
     "is_finite_number", "utcnow_iso",
     "C_HAS_TX", "C_HAS_ROUTE_LEGS", "C_HAS_RAW_JSON", "C_FULL",

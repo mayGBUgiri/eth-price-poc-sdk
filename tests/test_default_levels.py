@@ -48,13 +48,11 @@ class IntLevelKeysTest(unittest.TestCase):
             return {"q": raw, "price": 2_020.0, "impact": 1.0, "usd": 1_000.0}
 
         originals = {
-            "get_block_number": core.get_block_number,
             "fynd_spot": core.fynd_spot,
             "sweep_side": core.sweep_side,
             "anchor_target_from_sweep": core.anchor_target_from_sweep,
             "compute_robust_mid": core.compute_robust_mid,
         }
-        core.get_block_number = lambda rpc_url: 99
         core.fynd_spot = lambda cfg_arg, state_arg: 2_000.0
         core.sweep_side = (
             lambda cfg_arg, side, spot, state_arg, num_samples: sweep_by_side[side]

@@ -6,10 +6,13 @@ caller decides what to do with the snapshot.
 
 `cfg` is any object exposing the PairConfig fields (token_in/out with
 .address/.symbol/.decimals/.atomic(), fynd_base_url, search_*, impact_levels,
-sweep_samples_per_side, max_workers, slippage, enable_encoding, rpc_url,
+sweep_samples_per_side, max_workers, slippage, enable_encoding,
 tenderly_from_address, pair_label, collector_version). `state` is an optional
 error sink (anything with add_error/add_quote_failure/mid_degraded_count);
 pass None or NullSink() when generating data standalone.
+
+Fynd is the only service contacted. Block identity comes from the quotes
+themselves, so no Ethereum RPC endpoint is involved.
 """
 from __future__ import annotations
 
@@ -50,19 +53,6 @@ def utcnow_iso() -> str:
 
 def is_finite_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and math.isfinite(x)
-
-
-def get_block_number(rpc_url: str, timeout: int = 10) -> int:
-    r = requests.post(
-        rpc_url,
-        json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    d = r.json()
-    if "error" in d:
-        raise RuntimeError(f"RPC error: {d['error']}")
-    return int(d["result"], 16)
 
 
 # ── Fynd ─────────────────────────────────────────────────────────────────────
@@ -546,12 +536,6 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
     Both are None on failure.
     """
     started = time.monotonic()
-    try:
-        block = get_block_number(cfg.rpc_url)
-    except Exception as e:
-        state.add_error(f"rpc_block_number: {e}", "snapshot")
-        return None, None
-
     spot = fynd_spot(cfg, state)
     if spot is None or not is_finite_number(spot):
         state.add_error("fynd_spot returned no usable price", "snapshot")
@@ -671,23 +655,25 @@ def collect_snapshot(cfg: Config, state: CollectorState) -> tuple[dict | None, d
     quote_records = _iter_quote_records(levels, [sweep_buy, sweep_sell])
 
     # ── Block identity from the quotes themselves ───────────────────────
-    # The RPC head at cycle start can differ from the block Fynd actually
-    # solved against (a ~10s sweep straddles boundaries). Majority wins; a
-    # split is flagged rather than silently relabelled.
+    # Each Fynd response reports the block it solved against, so the snapshot
+    # is labelled from the quotes rather than from an external RPC head. A
+    # ~10s sweep can straddle a boundary: majority wins, and a split is
+    # flagged rather than silently relabelled.
     _bn_counts: dict[int, int] = {}
     for _rec in quote_records:
         _bn = _raw_quote_block(_rec.get("_raw"))
         if _bn is not None:
             _bn_counts[_bn] = _bn_counts.get(_bn, 0) + 1
-    mixed_block = False
-    if _bn_counts:
-        _majority = max(_bn_counts, key=_bn_counts.get)
-        mixed_block = len(_bn_counts) > 1
-        if mixed_block:
-            state.mixed_blocks += 1
-            state.add_error(
-                f"mixed-block snapshot: {_bn_counts} → labelled {_majority}", "block_identity")
-        block = _majority
+    if not _bn_counts:
+        state.add_error(
+            "no quote reported a block number; snapshot cannot be labelled", "block_identity")
+        return None, None
+    block = max(_bn_counts, key=_bn_counts.get)
+    mixed_block = len(_bn_counts) > 1
+    if mixed_block:
+        state.mixed_blocks += 1
+        state.add_error(
+            f"mixed-block snapshot: {_bn_counts} → labelled {block}", "block_identity")
 
     sweep_buy_for_mid = [rec for rec in sweep_buy if _quote_record_matches_block(rec, block)]
     sweep_sell_for_mid = [rec for rec in sweep_sell if _quote_record_matches_block(rec, block)]
