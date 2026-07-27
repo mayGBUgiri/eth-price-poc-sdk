@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eth-price-poc-sdk"
-version = "0.2.0"
-description = "Tiny Python client for the Price-of-Ethereum PoC dataset (block-by-block on-chain depth via Fynd + Tycho)."
+version = "0.3.0"
+description = "DEPRECATED — retired in favour of price-of-ethereum (https://github.com/propeller-heads/price-of-ethereum)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "PropellerHeads" }]
 keywords = ["defi", "fynd", "tycho", "depth", "ethereum", "trader-data"]
+classifiers = ["Development Status :: 7 - Inactive"]
 dependencies = [
     "requests>=2.34.2",
 ]
