@@ -1,13 +1,15 @@
-"""eth_price_poc: tiny Python client for the Price-of-Ethereum PoC dataset.
+"""eth_price_poc: build block-by-block on-chain depth data locally.
 
-See README for the full schema. Quickstart:
+Quotes come from your own Fynd instance over Tycho-indexed liquidity. Nothing
+here reads a PropellerHeads API, so every number is one you measured and can
+re-measure. See README for the full schema. Quickstart:
 
     from eth_price_poc import client
-    c = client()
-    snap = c.latest()
-    df   = c.history_as_dataframe(limit=720)
+    feed = client()
+    snap = feed.collect()
+    df   = feed.history_as_dataframe()
 """
-from .client import EthPricePoCClient, EthPricePoCDataUnavailable, client
+from .local import EthPricePoCDataUnavailable, LocalFeed, client
 
-__all__ = ["EthPricePoCClient", "EthPricePoCDataUnavailable", "client"]
-__version__ = "0.1.0"
+__all__ = ["LocalFeed", "EthPricePoCDataUnavailable", "client"]
+__version__ = "0.3.0"

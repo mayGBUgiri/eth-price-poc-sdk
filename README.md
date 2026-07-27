@@ -1,15 +1,23 @@
 # eth-price-poc-sdk
 
-Tiny Python client for the Price-of-Ethereum PoC dataset.
+Build block-by-block on-chain depth data for ETH — or any pair Tycho indexes —
+on your own machine.
 
-Pulls live or static depth/route snapshots from the public deployment
-(or any compatible API base) so you can analyse the data locally:
-plot it, write it to a notebook, run your own metrics on top.
+Every number this SDK produces comes from a quote your own [Fynd](https://t.me/FyndPortalBot)
+instance solved over Tycho-indexed liquidity. It does not read
+[marketprice.xyz](https://marketprice.xyz/) or any other PropellerHeads API.
+That is the point: the site shows one instance of this data, and this SDK is
+how you generate it independently and check the numbers for yourself.
 
-The landing page shows the headline charts; everything else
-(per-block route metadata, the dense per-block curve, per-target
-capping flags, etc.) is intended to be explored through this SDK
-against the same API.
+## What you get per block
+
+A sweep of real Fynd quotes across trade sizes in both directions, and from it:
+
+- **the price curve** — effective price at each size, ~200 measured points per side
+- **depth at each impact target** — how much you can trade before price moves 0.5%, 1%, 5%, …
+- **a robust mid** — median two-sided midpoint from shallow quotes, not a single pool's spot
+- **the route behind every rung** — protocol, pool, split and gas, per leg
+- **executable calldata** for the headline rungs, plus a Tenderly URL to simulate it
 
 ## Install
 
@@ -18,45 +26,7 @@ pip install "eth-price-poc-sdk @ git+https://github.com/propeller-heads/eth-pric
 # or, from a clone of this repo:  pip install -e .
 ```
 
-## Quickstart
-
-```python
-from eth_price_poc import client
-
-# Default base is the live deployment (https://marketprice.xyz), which serves
-# the API and the site from one origin. Pass base=... to point at your own.
-c = client()                       # hosted deployment currently serves ETH/USDC
-
-snap   = c.latest()       # most recent block's full snapshot
-status = c.status()       # mode (live/stale/degraded/starting), blocks_behind
-cov    = c.coverage()     # indexed protocols, components, fynd health, last update
-hist   = c.history(limit=720)  # rolling window
-dense  = c.history(limit=720, curve_n=48)  # finer per-block curves (12-200 pts/side)
-
-print(snap["block"], snap["spot_price"])
-print(c.tokens())         # token_in / token_out (address, symbol, decimals)
-
-# Per-rung route + executable quote for one depth cell
-d = c.detail(snap["block"], "buy", 1.0)   # None if not stored for that cell
-if d:
-    print([leg["protocol"] for leg in d["route_legs"]])
-
-# Optional pandas integration (install with: pip install "eth-price-poc-sdk[pandas]")
-df = c.history_as_dataframe(limit=720)
-print(df.head())
-```
-
-## Generate your own data
-
-The hosted dataset at [marketprice.xyz](https://marketprice.xyz) serves the
-latest collected ETH/USDC depth plus its rolling retained history. Check
-`client().status()` for freshness before treating a snapshot as live. No key is
-needed for reads.
-
-Want your own independent feed (other token pairs, lower latency, or no
-dependency on our uptime)? Run the generator against your own Fynd instance.
-The hosted API gives you retained history; your machine produces an independent
-live feed.
+## Run it yourself
 
 **1. Get a Fynd (Tycho) API key.** Open the Fynd portal bot on Telegram,
 [t.me/FyndPortalBot](https://t.me/FyndPortalBot), and follow the prompts.
@@ -69,113 +39,118 @@ export TYCHO_API_KEY=<your key>
 fynd serve --http-host 127.0.0.1 --http-port 3000
 ```
 
-**3. Generate snapshots** from your local Fynd:
+**3. Collect.** One JSON line per block on stdout:
 
 ```bash
-python -m eth_price_poc.generate.run_local --fynd-base http://127.0.0.1:3000
+python -m eth_price_poc.generate.run_local            # ETH/USDC, one block every ~12s
+python -m eth_price_poc.generate.run_local --once     # a single snapshot, then exit
 ```
 
-Or from Python, for any pair Tycho indexes:
+Or from Python:
 
 ```python
-from eth_price_poc.generate import PairConfig, TokenSpec, collect_snapshot, NullSink
+from eth_price_poc import client
 
-cfg = PairConfig(fynd_base_url="http://127.0.0.1:3000")   # ETH/USDC by default
-snap, _payload = collect_snapshot(cfg, NullSink())
+feed = client()                 # ETH/USDC against http://127.0.0.1:3000
+snap = feed.collect()           # measure one block
+
 print(snap["block"], snap["spot_price"], snap["robust_mid"])
+print(feed.status()["mode"])    # live / stale / degraded / starting
+print(feed.coverage()["protocols_routed"])
+
+# Per-rung route + executable quote for one depth cell
+detail = feed.detail(snap["block"], "buy", 1.0)
+print([leg["protocol"] for leg in detail["route_legs"]])
+
+# Keep collecting; history covers what this process has measured
+for _ in range(60):
+    feed.collect()
+df = feed.history_as_dataframe()      # needs the pandas extra
 ```
 
-`PairConfig` is the only thing that changes per token pair. Swap `token_in` and
-`token_out` (`TokenSpec(address, symbol, decimals)`) and the same
-depth/curve/route data falls out. The download client (`client()`) needs no key:
-it only reads our server. The key is solely for running your own Fynd.
+Point it at another pair by swapping `token_in` / `token_out` on `PairConfig` —
+that is the only thing that changes:
 
-## What you can do with this that the website can't show you
+```python
+from eth_price_poc.generate import PairConfig, TokenSpec
+from eth_price_poc import client
 
-- Plot the **full bookmap** at custom resolution (the site renders 176
-  rows; the data lets you pick any number).
-- Pull the **per-rung route** with `detail()` (which pools and protocols
-  the best route at a given block, side, and impact target actually used,
-  per leg).
-- Pull the **executable quote** with `export()` (the raw Fynd response,
-  the transaction calldata, the fee breakdown, and a Tenderly URL).
-- Backtest a fill strategy: "if I'd traded $X at this block, what would
-  it have cost vs the next 10 blocks?"
-- Cross-reference against your own dataset (CEX prints, on-chain
-  events, etc.).
-- Pull the dense `curve` array (~200 measured points per side on the hosted deployment; latest block via `latest()`, recent historical blocks via `curve_for_block()` / `/api/curve`)
-  and build a custom depth chart.
+cfg = PairConfig(
+    token_in=TokenSpec("0xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT", 6),
+    token_out=TokenSpec("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "WBTC", 8),
+    pair_label="WBTC/USDT",
+)
+feed = client(cfg)
+```
+
+## History is in-process
+
+`history()` returns the blocks **this process has collected**, oldest first,
+capped by `history_size` (720 by default). It starts empty. Nothing is written
+to disk, so a fresh process starts from zero — leave the collector running to
+build a window. Durable local storage is not implemented yet.
+
+Everything a read method returns is yours: modify it freely, and the retained
+window keeps serving the measurements it collected. The one cost to know about
+is that copying a large window takes a moment, so pass `history(limit=N)` or
+use `history_as_dataframe()` (which copies nothing) inside a per-block loop.
+
+## Network surface
+
+| Contacted | Why |
+|---|---|
+| your Fynd instance (`http://127.0.0.1:3000` by default) | every quote, price, route and block number |
+| Tycho, indirectly | Fynd streams indexed liquidity from it using your API key |
+
+No Ethereum RPC endpoint is used: block identity, hash, timestamp and gas price
+all come out of the Fynd quote responses, so a snapshot is always labelled with
+the block Fynd actually solved against. When a sweep straddles a block
+boundary, the majority block wins and `mixed_block` is set rather than the
+snapshot being silently relabelled.
 
 ## API surface
 
-| Method | Endpoint | Notes |
-|---|---|---|
-| `client.latest()` | `GET /api/latest` | Single most recent block, rich per-rung levels + dense curve |
-| `client.history(limit=N, curve_n=M)` | `GET /api/history?limit=N&curve_n=M` | Rolling window of slim blocks; server caps N at 2,000; `full=True` for dense curves (exclusive with `curve_n`) |
-| `client.status()` | `GET /api/status` | Mode (live/stale/degraded/starting), blocks_behind |
-| `client.coverage()` | `GET /api/coverage` | Indexed protocols, components, fynd health |
-| `client.detail(block, side, target_impact_pct)` | `GET /api/detail` | Per-rung route legs, execution tooltip, Tenderly URL; `None` if not stored |
-| `client.export(block, side, target_impact_pct)` | `GET /api/export` | Raw quote, calldata, fee breakdown; `None` if not stored |
-| `client.curve_for_block(block_index, side)` | `GET /api/curve` | Dense curve for one historical block |
-| `client.tokens()` | client-side | `token_in` / `token_out` metadata for the pair |
-| `client.history_as_dataframe(limit=N)` | derived | Convenience pandas wrapper |
+`client()` returns a `LocalFeed`.
 
-If the live API is unreachable, `client()` transparently falls back
-to the static `data.json` and `coverage_static.json` snapshots served
-from the same origin (`latest()`, `history()`, and `coverage()` only),
-frozen at the last refresh.
+| Method | Notes |
+|---|---|
+| `feed.collect()` | Measure one block, append it to the window, return the snapshot |
+| `feed.latest()` | Most recently collected block; collects one if the window is empty |
+| `feed.history(limit=N)` | Blocks collected by this process, oldest first |
+| `feed.status()` | `mode`, `last_block`, `head_block`, `blocks_behind`, Fynd health. Costs one probe quote |
+| `feed.coverage()` | Protocols and pools your quotes actually routed through, plus Fynd health |
+| `feed.detail(block, side, target_impact_pct)` | Per-rung route legs, execution tooltip, Tenderly URL |
+| `feed.export(block, side, target_impact_pct)` | Raw Fynd response, calldata, fee breakdown |
+| `feed.curve_for_block(block_index, side)` | Dense curve for one retained block (`-1` = latest) |
+| `feed.tokens()` | `token_in` / `token_out` metadata for the configured pair |
+| `feed.history_as_dataframe(limit=N)` | pandas wrapper; install with `pip install "eth-price-poc-sdk[pandas]"` |
+
+`detail()` and `export()` return `None` for a block outside the retained
+window. Both snap to the nearest measured target and report the distance
+(`legs_from_target`, `raw_from_target`; `None` when the target matched
+exactly). Route legs are kept for every rung; raw responses and calldata only
+for the anchored headline targets (0.5, 1, 5, 10, 25, 50%), which is why
+`export()` for another rung resolves to the nearest anchor.
 
 ## Schema reference
 
-The hosted API keeps the bulk endpoints slim and serves per-rung detail on
-demand. `history` and `latest` therefore have **different shapes**.
-
-### `history()` — slim blocks
-
-The response wraps the window plus pair-level metadata:
+Every retained block is a full snapshot — there is no slim-vs-rich distinction,
+because nothing is being trimmed for transport.
 
 ```
-pair:          "ETH/USDC"
-impact_levels: [float]      # the targets present under each block's `levels`
-total_blocks:  int
-updated_at:    str
-blocks: [ {
-  block:       int          # Ethereum block number
-  time:        str          # ISO-8601 UTC, when this snapshot was collected
-  spot_price:  float        # marginal-trade price (~$1K probe)
-  robust_mid:  float        # median shallow two-sided mid from sweep quotes
-  duration_ms: int          # how long this snapshot took to assemble
-  block_hash:  str
-  levels: {                 # per-target depth, slimmed
-    "1.0": { "buy":  { amount_usd, price, bound },
-             "sell": { ... } }, ...
-  }
-  curve: { "buy": [ { amount_usd, price } ], "sell": [ ... ] }   # downsampled
-}, ... ]
-```
-
-`curve` here is downsampled (`history(curve_n=N)`, 12–200); `history(full=True)`
-returns the dense per-block curve instead (the two are mutually exclusive). On the wire the live server sends the
-downsampled form as compact `{"a": [sizes], "p": [prices]}` arrays; the client
-normalizes those to the `[{amount_usd, price}]` shape above, so `history()`
-always returns list-form curves regardless of which path (live, `full=1`,
-static fallback) served the response.
-
-### `latest()` — one rich block
-
-The most recent block carries the full per-rung level fields and the dense
-(~200 pt/side) curve:
-
-```
-block, time, spot_price, robust_mid, duration_ms, block_hash, ts_ms
-median_depth, gas_price_wei, completeness, collector_version, quote_source
+block, time, duration_ms, pair, block_hash, block_ts, mixed_block
+spot_price       # marginal-trade price (~$1K probe)
+robust_mid       # median shallow two-sided mid from the sweep quotes
+median_depth     # notional the mid was taken at
+gas_price_wei, quote_source
+token_in / token_out: { address, symbol, decimals }
 impact_levels: [float]
 levels: {
   "1.0": {
-    "buy":  { amount_usd, price, actual_impact_pct, target_impact_pct,
-              target_reached, bound, amount_in, amount_out,
-              amount_out_net_gas, gas_estimate, price_impact_bps,
-              gas_cost_eth, gas_cost_token_out, direction, quote_source }
+    "buy":  { target_impact_pct, actual_impact_pct, target_reached, bound,
+              amount_usd, amount_in, amount_out, amount_out_net_gas, price,
+              gas_estimate, route, search_min_usd, search_max_usd,
+              direction, quote_source, derived_from }
     "sell": { ... }
   }, ...
 }
@@ -185,13 +160,17 @@ curve: {
   "sell": [ ... ]
   samples_per_side, search_min_usd, search_max_usd
 }
+route_meta            # route behind the 1% buy probe
+route_meta_by_level   # routes at 0.1, 1, 10, 25, 50%
 ```
 
 Capped values are marked explicitly: `bound:"max"` when the search ceiling
-can't reach the target impact, `bound:"min"` when even the smallest probed
-size already exceeds it.
+can't reach the target impact, `bound:"min"` when even the smallest probed size
+already exceeds it. `derived_from` is `anchored_bisection` for the headline
+targets (a real quote bisected onto the target) and `nearest_real_quote` for
+rungs taken from the sweep crossing. No value is ever interpolated.
 
-### `detail(block, side, target_impact_pct)` — per-rung route
+### `detail(block, side, target_impact_pct)`
 
 ```
 block, side, target_impact_pct, block_hash, block_ts_ms
@@ -200,14 +179,23 @@ route_legs: [ { leg_index, protocol, component_id, split,
                 token_out: { address, symbol, decimals },
                 amount_in_atomic, amount_out_atomic, gas_estimate_units,
                 etherscan_url } ]
-legs_from_target: float | null   # nearest stored target, if not exact
+legs_from_target: float | null
 tooltip: { actual_impact_pct, effective_price, mid, price_impact_bps,
-           bound, target_reached, gas_cost_eth, ... }
+           amount_usd, bound, target_reached, gas_cost_eth,
+           gas_cost_token_out, gas_estimate_units, derived_from }
 tenderly: { url, status }
 raw_response_available: bool
 ```
 
-### `export(block, side, target_impact_pct)` — executable quote
+`tenderly.status` is `ready`, or `missing_sender` when no
+`tenderly_from_address` is configured, or `no_transaction` when the quote
+carried no encoded calldata.
+
+`split` carries Fynd's convention verbatim: `0` means "the remainder of the
+input", not "zero percent". A single-leg route therefore reports `split: 0.0`
+while routing the whole trade.
+
+### `export(block, side, target_impact_pct)`
 
 ```
 block, side, target_impact_pct, order_id, solve_time_ms
@@ -218,20 +206,28 @@ tenderly:      { url, status }
 raw_from_target: float | null
 ```
 
-### Generator-only fields
+## Reproducing what the site shows
 
-`token_in` / `token_out`, `route_meta` (1% probe route), and
-`route_meta_by_level` (pre-aggregated routes per key target) are produced by
-the local generator (`collect_snapshot`, see below) but are **not** served by
-`marketprice.xyz`. Against the hosted API the same information is available a
-different way: `client.tokens()` for token metadata, and `client.detail()` for
-per-rung routes (call it per depth cell; `route_meta` is `detail(block, "buy",
-1.0)`). `derived_from` (`anchored_bisection` for headline targets,
-`nearest_real_quote` for sweep-derived rungs) appears in the generator output;
-the hosted `detail()` exposes the equivalent via `legs_from_target`.
+The defaults collect 200 quotes per side per block, the resolution
+marketprice.xyz publishes. The sweep floor is deliberately lower than the $10K
+the site charts from: the shallow rungs of `impact_levels` and the robust-mid
+band both need measurements below $10K. Filter the curve to `amount_usd >=
+10_000` to compare like for like.
 
-## Pair support
+Two differences worth knowing about when your numbers don't match the site's:
 
-The hosted deployment serves **ETH/USDC only** today. The generator and client
-can target another pair when used with a compatible Fynd/API deployment; that
-does not imply that pair is available from `marketprice.xyz`.
+- **Liquidity is not deterministic.** Two Fynd instances on the same block can
+  route differently if they are indexing different protocol sets or TVL
+  thresholds. Compare `coverage()["protocols_routed"]` first.
+- **The site's headline figures are computed in its frontend** — extra cost vs
+  spot, liquidity bias, market condition, the bookmap's bucketing. This SDK
+  gives you the measurements those are derived from, not the derivations
+  themselves.
+
+## Not implemented
+
+- **Durable storage.** History lives in the process that collected it.
+- **The site's derived indicators.** See above.
+- **Full indexed-universe coverage.** `coverage()` reports what your quotes
+  routed through. The "indexed liquidity universe" count on the site comes from
+  Fynd's startup logs; no Fynd endpoint exposes it.

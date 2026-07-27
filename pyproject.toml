@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eth-price-poc-sdk"
-version = "0.2.0"
-description = "Tiny Python client for the Price-of-Ethereum PoC dataset (block-by-block on-chain depth via Fynd + Tycho)."
+version = "0.3.0"
+description = "Generate block-by-block on-chain depth data locally with your own Fynd + Tycho instance."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
